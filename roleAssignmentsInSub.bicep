@@ -12,11 +12,13 @@ resource contributorRoleAssignment 'Microsoft.Authorization/roleAssignments@2022
   }
 }
 
-module acrPullRoleAssignmentModule './acrPullRoleAssignment.bicep' = {
-  name: guid('0895de50-30a3-4b75-aada-5b23ebd4e8bc', principalId, 'AcrPull')
-  scope: subscription('0895de50-30a3-4b75-aada-5b23ebd4e8bc')
-  params: {
+resource acrPullRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(subscription().id, principalId, 'AcrPull')
+  scope: subscription() // Set the scope to the subscription level
+  properties: {
     principalId: principalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d') // AcrPull Role
+    principalType: 'ServicePrincipal'
   }
 }
 

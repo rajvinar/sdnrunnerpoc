@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: container3-pod
+  labels:
+    app: container3pod
+spec:
+  containers:
+  - name: container3
+    image: acnsdnrunners.azurecr.io/workerlinux:v0.0.7
+    ports:
+    - containerPort: 443
+      protocol: TCP
+    - containerPort: 8080
+      protocol: TCP
+    resources:
+      requests:
+        memory: "1Gi"
+        cpu: "1"
+      limits:
+        memory: "1Gi"
+        cpu: "1"
+  - name: alpine
+    image: alpine
+    command: ["/bin/sh"]
+    args: ["-c", "while true; do sleep 36000; done"]
+  - name: debug
+    image: nicolaka/netshoot
+    command: ["sh"]
+    args: ["-c", "sleep infinity"]
+  nodeSelector:
+    cx: vm1
+  restartPolicy: Always

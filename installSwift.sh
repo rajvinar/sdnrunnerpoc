@@ -199,6 +199,42 @@ for NODE in "${WORKER_NODES[@]}"; do
   echo "Successfully labeled node: $NODE"
 done
 
+process_cluster() {
+    local cluster_name=$1
+    local resource_group=$2
+
+    echo "Processing cluster: $cluster_name in resource group: $resource_group"
+
+    nodes=($(kubectl get nodes -l kubernetes.azure.com/managed=false -o jsonpath='{.items[*].metadata.name}'))
+
+    # Adding labels to nodes
+    echo "Adding labels to nodes"
+    SOURCE_NODE=$(kubectl get nodes --selector='!kubernetes.azure.com/managed' -o jsonpath='{.items[0].metadata.name}')
+    LABEL_KEYS=(
+    "kubernetes\.azure\.com\/podnetwork-type"
+    "kubernetes\.azure\.com\/podnetwork-subscription"
+    "kubernetes\.azure\.com\/podnetwork-resourcegroup"
+    "kubernetes\.azure\.com\/podnetwork-name"
+    "kubernetes\.azure\.com\/podnetwork-subnet"
+    "kubernetes\.azure\.com\/podnetwork-multi-tenancy-enabled"
+    "kubernetes\.azure\.com\/podnetwork-delegationguid"
+        )
+        if [  "${{ parameters.cnscniversion }}" == "none" ]; then
+          LABEL_KEYS+=("kubernetes\.azure\.com\/cluster")
+          echo "Added cluster tag"
+        fi
+    for NODENAME in "${nodes[@]}"; do
+        for label_key in "${LABEL_KEYS[@]}"; do
+        v=$(kubectl get nodes "$SOURCE_NODE" -o jsonpath="{.metadata.labels['$label_key']}")
+        l=$(echo "$label_key" | sed 's/\\//g')
+        echo "Labeling node $NODENAME with $l=$v"
+        kubectl label node "$NODENAME" "$l=$v" --overwrite
+        done
+    done
+}
+
+process_cluster "$CLUSTER_NAME" "$RESOURCE_GROUP"
+
 
 # echo "Deploying cns ConfigMap and DaemonSet..."
 # Deploy the cns ConfigMap
@@ -253,7 +289,7 @@ echo "Successfully port forwarded to DNC: $DNC_URL"
 
 ########### Port Forwarding Setup End ###########
 
-################ Join vnet ################
+# ################ Join vnet ################
 NETWORK_ID=$CUSTOMER_VNET_ID
 DNC_ENDPOINT=$DNC_URL
 RETRY_COUNT=100  # Number of retry attempts
@@ -356,7 +392,7 @@ if [[ $attempt -gt $RETRY_COUNT ]]; then
 fi
 
 
-############# Join subnet to DNC #############
+# ############# Join subnet to DNC #############
 # Variables
 DNC_API_ENDPOINT=$DNC_URL
 CUSTOMER_VNET_GUID=$CUSTOMER_VNET_ID
@@ -472,7 +508,7 @@ for i in "${!CUSTOMER_SUBNET_NAMES[@]}"; do
   fi
 done
 
-###################### Register nodes in DNC ######################
+# ###################### Register nodes in DNC ######################
 # Define an array of nodes with their details
 # NODES=(
 #   "linuxpool160000000|10.224.0.76"  # Format: NODE_ID|NODE_IP TODO: Make it come from inputs
@@ -758,6 +794,7 @@ PODS=(
   "container1-pod|container1.yaml|cx=vm1"  # Format: POD_NAME|POD_YAML|LABEL_SELECTOR|NODE_NAME TODO: Make it come from inputs
   "container2-pod|container2.yaml|cx=vm2"
 )
+
 
 # Loop over the PODS array
 for i in "${!PODS[@]}"; do

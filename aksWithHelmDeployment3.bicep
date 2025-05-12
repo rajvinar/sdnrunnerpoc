@@ -1,14 +1,14 @@
 @description('Name of the cluster')
-param clusterName string = 'aks'
+param clusterName string
 @description('Region')
-param region string = 'eastus2euap'
+param region string
 @description('Resource Group')
-param rg string = resourceGroup().name
+param rg string
 @description('Name of the cosmosdb')
-param cosmosdbName string = 'daladb'
+param cosmosdbName string
 
 @description('Subscription ID')
-param subscriptionId string = subscription().subscriptionId
+param subscriptionId string
 param infraVnetName string = 'infraVnet'
 param infraSubnetName string = 'infraSubnet'
 param aciSubnetName string = 'aci-subnet'
@@ -18,14 +18,74 @@ param delegatedSubnet1Name string = 'delegatedSubnet1'
 param dncVMSSNames array = ['dncpool20']
 param workerVMSSNames array = ['linuxpool20', 'linuxpool21']
 
+
+
+
 // TODO: will be different in ame need to check pr
-param subnetDelegatorEnvironment string = 'env-eastus2euap-nwwam'
-param subnetDelegatorName string = 'subnetdelegator-eastus2euap-nwwa'
-param subnetDelegatorRg string = 'subnetdelegator-eastus2euap'
+param subnetDelegatorEnvironment string = 'env-westus-u3h4j'
+param subnetDelegatorName string = 'subnetdelegator-westus-u3h4j'
+param subnetDelegatorRg string = 'subnetdelegator-westus'
 // param subnetDelegatorSubscriptionId string = 'b2f3c0a1-4d5e-4b8e-9f7c-6d5a0f1b2c3d'
-param subnetDelegatorSubscriptionId string = '0895de50-30a3-4b75-aada-5b23ebd4e8bc'
+param subnetDelegatorSubscriptionId string = '9b8218f9-902a-4d20-a65c-e98acec5362f'
 ////////////////
 param msiRg string = 'RunnersIdentities'
+
+
+
+
+
+var dataActions = [
+  'Microsoft.DocumentDB/databaseAccounts/readMetadata'
+  'Microsoft.DocumentDB/databaseAccounts/throughputSettings/*'
+  'Microsoft.DocumentDB/databaseAccounts/tables/write'
+  'Microsoft.DocumentDB/databaseAccounts/tables/containers/write'
+  'Microsoft.DocumentDB/databaseAccounts/tables/containers/executeQuery'
+  'Microsoft.DocumentDB/databaseAccounts/tables/containers/executeStoredProcedure'
+  'Microsoft.DocumentDB/databaseAccounts/tables/containers/entities/*'
+] 
+
+
+resource customRole 'Microsoft.DocumentDB/databaseAccounts/tableRoleDefinitions@2024-12-01-preview' = {
+  name: guid(cosmosdb.id, 'DncCosmosDbRbacRole')
+  parent: cosmosdb
+  properties: {
+    roleName: 'DncCosmosDbRbacRole'
+    type: 'CustomRole'
+    permissions: [
+      {
+        dataActions: dataActions
+      }
+    ]
+    assignableScopes: [
+      '${cosmosdb.id}'
+    ]
+  }
+}
+
+resource aksClusterKubeletIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-07-31-preview' = {
+  name: 'aksClusterKubeletIdentity'
+  location: region
+}
+
+resource cosmosdbRoleAssignmentForDNC 'Microsoft.DocumentDB/databaseAccounts/tableRoleAssignments@2024-12-01-preview' = {
+  name: guid(cosmosdb.id, customRole.id, 'aksClusterKubeletIdentity', 'roleAssignment')
+  parent: cosmosdb
+  properties: {
+    principalId: aksClusterKubeletIdentity.properties.principalId
+    roleDefinitionId: customRole.id
+    scope: cosmosdb.id
+  }
+}
+
+module roleAssignments './roleAssignmentsInSub.bicep' = {
+  name: 'roleAssignmentsDeployment'
+  scope: subscription() // Explicitly set the module scope to subscription
+  params: {
+    principalId: aksClusterKubeletIdentity.properties.principalId
+  }
+}
+
+
 
 resource subnetDelegator 'Microsoft.App/containerApps@2024-10-02-preview' existing = {
   name: subnetDelegatorName
@@ -56,7 +116,7 @@ resource ip 'Microsoft.Network/publicIPAddresses@2023-11-01' = {
   }
 }
 
-resource aciNatGw 'Microsoft.Network/natGateways@2024-05-01' = {
+resource aciNatGw 'Microsoft.Network/natGateways@2024-05-01'  = {
   name: 'aciNatGw-${uniqueString(resourceGroup().name)}'
   location: region
   sku: {
@@ -66,6 +126,25 @@ resource aciNatGw 'Microsoft.Network/natGateways@2024-05-01' = {
     publicIpAddresses:[ {
       id: ip.id
     }]
+  }
+}
+
+resource outboundIp 'Microsoft.Network/publicIPAddresses@2023-11-01' = {
+  name: 'serviceTaggedIp-${clusterName}'
+  location: region
+  sku: {
+    name: 'Standard'
+    tier: 'Regional'
+  }
+  properties: {
+    ipTags: [
+      {
+        ipTagType: 'FirstPartyUsage'
+        tag: '/DelegatedNetworkControllerTest'
+      }
+    ]
+    publicIPAddressVersion: 'IPv4'
+    publicIPAllocationMethod: 'Static'
   }
 }
 
@@ -112,6 +191,27 @@ resource infraVnet 'Microsoft.Network/virtualNetworks@2024-05-01' = {
   }
 }
 
+resource privateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = {
+  name: 'pe-subnetdelegator-${uniqueString(subnetDelegatorName)}'
+  location: region
+  properties: {
+    privateLinkServiceConnections: [
+      {
+        name: 'pe-subnetdelegator-${uniqueString(subnetDelegatorName)}-connection'
+        properties: {
+          privateLinkServiceId: subnetDelegatorAcaEnv.id
+          groupIds: [
+            'managedEnvironments'
+          ]
+        }
+      }
+    ]
+    subnet: {
+      id: infraVnet.properties.subnets[1].id
+    }
+  }
+}
+
 resource customerVnet 'Microsoft.Network/virtualNetworks@2021-08-01' = {
   name: 'customerVnet'
   location: region
@@ -153,32 +253,136 @@ resource customerVnet 'Microsoft.Network/virtualNetworks@2021-08-01' = {
     ]
   }
 }
-resource privateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' ={
-  name: 'pe-subnetdelegator-${uniqueString(subnetDelegatorName)}'
+
+resource cluster 'Microsoft.ContainerService/managedClusters@2024-02-01' = {
+  name: clusterName
   location: region
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      //'/subscriptions/9b8218f9-902a-4d20-a65c-e98acec5362f/resourceGroups/standalone-nightly-pipeline/providers/Microsoft.ManagedIdentity/userAssignedIdentities/standalone-sub-contributor': {}
+      // '/subscriptions/9b8218f9-902a-4d20-a65c-e98acec5362f/resourceGroups/dala-aks-runner8/providers/Microsoft.ManagedIdentity/userAssignedIdentities/aksClusterKubeletIdentity': {}
+      '${aksClusterKubeletIdentity.id}': {}
+    }
+  }
+  tags: {
+    'aks-nic-enable-multi-tenancy': 'false'
+    'stampcreatorserviceinfo' : 'true'
+  }
   properties: {
-    privateLinkServiceConnections: [
+    aadProfile: {
+      managed: true
+      enableAzureRBAC: true
+    }
+
+    agentPoolProfiles: [
       {
-        name: 'pe-subnetdelegator-${uniqueString(subnetDelegatorName)}-connection'
-        properties: {
-          privateLinkServiceId: subnetDelegatorAcaEnv.id
-          groupIds: [
-            'managedEnvironments'
-          ]
+        count: 1
+        enableAutoScaling: false
+        enableEncryptionAtHost: false
+        enableNodePublicIP: false
+        mode: 'System'
+        name: 'dncpool0'
+        osType: 'Linux'
+        type: 'VirtualMachineScaleSets'
+        vmSize: 'Standard_D2_v2'
+        vnetSubnetID: infraVnet.properties.subnets[0].id
+        tags: {
+          fastpathenabled: 'false'
+          'aks-nic-enable-multi-tenancy': 'false'
+		      'stampcreatorserviceinfo' : 'true'
+        }
+      }
+      {
+        count: 1
+        enableAutoScaling: false
+        enableEncryptionAtHost: false
+        enableNodePublicIP: false
+        mode: 'User'
+        name: 'linuxpool0'
+        nodeLabels: {
+          nchost: 'true'
+        }
+        osType: 'Linux'
+        type: 'VirtualMachineScaleSets'
+        vmSize: 'Standard_D2_v2'
+        vnetSubnetID: infraVnet.properties.subnets[0].id
+        tags: {
+          fastpathenabled: 'false'
+          'aks-nic-enable-multi-tenancy': 'false'
+		      'stampcreatorserviceinfo' : 'true'
         }
       }
     ]
-    subnet: {
-      id: infraVnet.properties.subnets[1].id
+    dnsPrefix: clusterName
+    identityProfile: {
+      kubeletidentity: {
+        // resourceId: '/subscriptions/9b8218f9-902a-4d20-a65c-e98acec5362f/resourceGroups/standalone-nightly-pipeline/providers/Microsoft.ManagedIdentity/userAssignedIdentities/standalone-sub-contributor'
+        // resourceId: '/subscriptions/9b8218f9-902a-4d20-a65c-e98acec5362f/resourceGroups/dala-aks-runner8/providers/Microsoft.ManagedIdentity/userAssignedIdentities/aksClusterKubeletIdentity'
+        resourceId: aksClusterKubeletIdentity.id
+        clientId: '8134a3dc-ad2c-486b-adeb-a4ff75cb55c5'
+        objectId: '71c8ae14-0aa4-4962-a1ef-46aff516a9ee'
+      }
+    }
+    networkProfile: {
+      loadBalancerProfile: {
+        managedOutboundIPs: null
+        outboundIPPrefixes: null
+        outboundIPs: {
+          publicIPs: [
+            {
+              id: outboundIp.id
+            }
+          ]
+        }
+      }
+
+      networkMode: 'transparent'
+      networkPlugin: 'azure'
+
+      serviceCidr: '10.0.0.0/16'
+      dnsServiceIP: '10.0.0.10'
+      outboundType: 'loadBalancer'
     }
   }
 }
 
-resource userAssignedIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-07-31-preview' existing = {
-  // name: 'helm-script-msi3'
-  // region: region
-  name: 'deploymentscript-msi'
-  scope: resourceGroup(msiRg)
+
+
+resource cosmosdb 'Microsoft.DocumentDB/databaseAccounts@2022-05-15' = {
+  name: cosmosdbName
+  location: region
+  kind: 'GlobalDocumentDB'
+  properties: {
+    enableMultipleWriteLocations: false
+    enableAutomaticFailover: false
+    databaseAccountOfferType: 'Standard'
+    disableLocalAuth: true
+    capabilities: [
+      {
+        name: 'EnableTable'
+      }
+    ]
+    consistencyPolicy: {
+      defaultConsistencyLevel: 'Session'
+      maxIntervalInSeconds: 5
+      maxStalenessPrefix: 100
+    }
+    locations: [
+      {
+        locationName: region
+        provisioningState: 'Succeeded'
+        failoverPriority: 0
+        isZoneRedundant: false
+      }
+    ]
+  }
+}
+
+
+resource userAssignedIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-07-31-preview' = {
+  name: 'helm-script-msi3'
+  location: region
 }
 
 module roleAssignments1 './roleAssignmentsInSub.bicep' = {
@@ -226,6 +430,16 @@ resource storageContributor 'Microsoft.Authorization/roleAssignments@2022-04-01'
     principalType: 'ServicePrincipal'
   }
 }
+
+module testResourcesModule './testResources.bicep' = {
+  name: 'testResourcesDeployment'
+  params: {
+    region: region
+  }
+}
+
+output fqdn1 string = testResourcesModule.outputs.fqdn1
+output fqdn2 string = testResourcesModule.outputs.fqdn2
 
 param randomGuid string = newGuid()
 
@@ -277,251 +491,6 @@ resource ds 'Microsoft.Resources/deploymentScripts@2023-08-01' = {
 output salToken string = ds.properties.outputs.salToken
 output salToken1 string = ds.properties.outputs.salToken1
 
-// Cleanup script
-resource dsGc 'Microsoft.Resources/deploymentScripts@2023-08-01' = {
-  #disable-next-line use-stable-resource-identifiers
-  name: 'ds-gc-${uniqueString(resourceGroup().name)}' 
-  kind: 'AzureCLI'
-  identity: {
-    type: 'UserAssigned'
-    userAssignedIdentities: {
-      '${userAssignedIdentity.id}': {}
-    }
-  }
-  dependsOn: [
-    ds
-    storageContributor
-  ]
-  location: region
-  properties: {
-    azCliVersion: '2.69.0'
-    forceUpdateTag: randomGuid
-    retentionInterval: 'PT2H'
-    cleanupPreference: 'Always'
-    timeout: 'PT20M'
-    scriptContent: concat(
-      'az account set -s ${subscription().subscriptionId};',
-      'az storage account delete --name ${dsStorage.name} -y;'
-    )
-  }
-}
-
-var dataActions = [
-  'Microsoft.DocumentDB/databaseAccounts/readMetadata'
-  'Microsoft.DocumentDB/databaseAccounts/throughputSettings/*'
-  'Microsoft.DocumentDB/databaseAccounts/tables/write'
-  'Microsoft.DocumentDB/databaseAccounts/tables/containers/write'
-  'Microsoft.DocumentDB/databaseAccounts/tables/containers/executeQuery'
-  'Microsoft.DocumentDB/databaseAccounts/tables/containers/executeStoredProcedure'
-  'Microsoft.DocumentDB/databaseAccounts/tables/containers/entities/*'
-] 
-
-resource customRole 'Microsoft.DocumentDB/databaseAccounts/tableRoleDefinitions@2024-12-01-preview' = {
-  name: guid(cosmosdb.id, 'DncCosmosDbRbacRole')
-  parent: cosmosdb
-  properties: {
-    roleName: 'DncCosmosDbRbacRole'
-    type: 'CustomRole'
-    permissions: [
-      {
-        dataActions: dataActions
-      }
-    ]
-    assignableScopes: [
-      '${cosmosdb.id}'
-    ]
-  }
-}
-
-resource aksClusterKubeletIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-07-31-preview' = {
-  name: 'aksClusterKubeletIdentity'
-  location: region
-}
-
-resource cosmosdbRoleAssignmentForDNC 'Microsoft.DocumentDB/databaseAccounts/tableRoleAssignments@2024-12-01-preview' = {
-  name: guid(cosmosdb.id, customRole.id, 'aksClusterKubeletIdentity', 'roleAssignment')
-  parent: cosmosdb
-  properties: {
-    principalId: aksClusterKubeletIdentity.properties.principalId
-    roleDefinitionId: customRole.id
-    scope: cosmosdb.id
-  }
-}
-
-module roleAssignments './roleAssignmentsInSub.bicep' = {
-  name: 'roleAssignmentsDeployment'
-  scope: subscription() // Explicitly set the module scope to subscription
-  params: {
-    principalId: aksClusterKubeletIdentity.properties.principalId
-  }
-}
-
-
-resource outboundIp 'Microsoft.Network/publicIPAddresses@2023-11-01' = {
-  name: 'serviceTaggedIp-${clusterName}'
-  location: region
-  sku: {
-    name: 'Standard'
-    tier: 'Regional'
-  }
-  properties: {
-    ipTags: [
-      {
-        ipTagType: 'FirstPartyUsage'
-        tag: '/DelegatedNetworkControllerTest'
-      }
-    ]
-    publicIPAddressVersion: 'IPv4'
-    publicIPAllocationMethod: 'Static'
-  }
-}
-
-resource cluster 'Microsoft.ContainerService/managedClusters@2024-02-01' = {
-  name: clusterName
-  location: region
-  identity: {
-    type: 'UserAssigned'
-    userAssignedIdentities: {
-      //'/subscriptions/9b8218f9-902a-4d20-a65c-e98acec5362f/resourceGroups/standalone-nightly-pipeline/providers/Microsoft.ManagedIdentity/userAssignedIdentities/standalone-sub-contributor': {}
-      // '/subscriptions/9b8218f9-902a-4d20-a65c-e98acec5362f/resourceGroups/dala-aks-runner8/providers/Microsoft.ManagedIdentity/userAssignedIdentities/aksClusterKubeletIdentity': {}
-      '${aksClusterKubeletIdentity.id}': {}
-    }
-  }
-  properties: {
-    
-
-    aadProfile: {
-      managed: true
-      enableAzureRBAC: true
-    }
-
-    agentPoolProfiles: [
-      {
-        count: 1
-        enableAutoScaling: false
-        enableEncryptionAtHost: false
-        enableNodePublicIP: false
-        mode: 'System'
-        name: 'dncpool0'
-        osType: 'Linux'
-        type: 'VirtualMachineScaleSets'
-        vmSize: 'Standard_D2_v2'
-        vnetSubnetID: infraVnet.properties.subnets[0].id
-      }
-      {
-        count: 1
-        enableAutoScaling: false
-        enableEncryptionAtHost: false
-        enableNodePublicIP: false
-        mode: 'User'
-        name: 'linuxpool0'
-        nodeLabels: {
-          nchost: 'true'
-        }
-        osType: 'Linux'
-        type: 'VirtualMachineScaleSets'
-        vmSize: 'Standard_D2_v2'
-        vnetSubnetID: infraVnet.properties.subnets[0].id
-      }
-    ]
-    dnsPrefix: clusterName
-    identityProfile: {
-      kubeletidentity: {
-        // resourceId: '/subscriptions/9b8218f9-902a-4d20-a65c-e98acec5362f/resourceGroups/standalone-nightly-pipeline/providers/Microsoft.ManagedIdentity/userAssignedIdentities/standalone-sub-contributor'
-        // resourceId: '/subscriptions/9b8218f9-902a-4d20-a65c-e98acec5362f/resourceGroups/dala-aks-runner8/providers/Microsoft.ManagedIdentity/userAssignedIdentities/aksClusterKubeletIdentity'
-        resourceId: aksClusterKubeletIdentity.id
-        clientId: '8134a3dc-ad2c-486b-adeb-a4ff75cb55c5'
-        objectId: '71c8ae14-0aa4-4962-a1ef-46aff516a9ee'
-      }
-    }
-    networkProfile: {
-      loadBalancerProfile: {
-        outboundIPs: {
-          publicIPs: [
-            {
-              id: outboundIp.id
-            }
-          ]
-        }
-      }
-
-      networkMode: 'transparent'
-      networkPlugin: 'azure'
-    }
-  }
-}
-
-resource defaultNamespace 'Microsoft.Kubernetes/namespaces@2023-10-01' = {
-  parent: cluster
-  name: 'default'
-}
-
-resource gcPod 'Microsoft.Kubernetes/namespaces/pods@2023-10-01' = {
-  parent: defaultNamespace
-  name: 'gcPod' // Specify the namespace and pod name
-  properties: {
-    apiVersion: 'v1'
-    kind: 'Pod'
-    metadata: {
-      name: 'gcPod'
-    }
-    spec: {
-      containers: [
-        {
-          name: 'gcContainer'
-          image: 'acndev.azurecr.io/runnertinyproxy:latest'
-          ports: [
-            {
-              containerPort: 8888
-            }
-          ]
-        }
-      ]
-    }
-  }
-}
-
-resource cosmosdb 'Microsoft.DocumentDB/databaseAccounts@2022-05-15' = {
-  name: cosmosdbName
-  location: region
-  kind: 'GlobalDocumentDB'
-  properties: {
-    enableMultipleWriteLocations: false
-    enableAutomaticFailover: false
-    databaseAccountOfferType: 'Standard'
-    disableLocalAuth: true
-    capabilities: [
-      {
-        name: 'EnableTable'
-      }
-    ]
-    consistencyPolicy: {
-      defaultConsistencyLevel: 'Session'
-      maxIntervalInSeconds: 5
-      maxStalenessPrefix: 100
-    }
-    locations: [
-      {
-        locationName: region
-        provisioningState: 'Succeeded'
-        failoverPriority: 0
-        isZoneRedundant: false
-      }
-    ]
-  }
-}
-module testResourcesModule './testResources.bicep' = {
-  name: 'testResourcesDeployment'
-  params: {
-    region: region
-  }
-}
-
-output fqdn1 string = testResourcesModule.outputs.fqdn1
-output fqdn2 string = testResourcesModule.outputs.fqdn2
-
-
-
 // Execute script
 resource aksBYNOScript 'Microsoft.Resources/deploymentScripts@2020-10-01' = {
   #disable-next-line use-stable-resource-identifiers
@@ -544,19 +513,20 @@ resource aksBYNOScript 'Microsoft.Resources/deploymentScripts@2020-10-01' = {
     retentionInterval: 'PT2H'
     cleanupPreference: 'OnExpiration'
     timeout: 'PT20M'
-    primaryScriptUri: 'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/aksBYON.sh'
-    arguments: '-g ${resourceGroup().name} -c ${clusterName} -u ${subscription().subscriptionId}'
+    primaryScriptUri: 'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/aksBYON.sh'
+    arguments: '-g ${rg} -c ${clusterName} -u ${subscriptionId}'
     supportingScriptUris: [
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/Chart.yaml'
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/values.yaml'
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/cni-plugins-installer.yaml'
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/cns-unmanaged-windows.yaml'
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/cns-unmanaged.yaml'
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/azure_cni_daemonset.yaml'
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/azure_cns_configmap.yaml'
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/dnc_deployment.yaml'
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/azure_cns_daemonset.yaml'
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/bootstrap-role.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/Chart.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/values.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/cni-plugins-installer.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/cns-unmanaged-windows.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/cns-unmanaged.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/azure_cni_daemonset.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/azure_cns_configmap.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/dnc_deployment.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/azure_cns_daemonset.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/bootstrap-role.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/kube-proxy-unmanaged.yaml'
       'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/gccontainer.yaml'
     ]
   }
@@ -564,6 +534,8 @@ resource aksBYNOScript 'Microsoft.Resources/deploymentScripts@2020-10-01' = {
   //   'Az.Sec.DisableLocalAuth.Storage::Skip': 'Temporary bypass for deployment'
   // }
 }
+
+
 
 
 module dncVmssCreation 'vmssCreation.bicep' = {
@@ -617,24 +589,26 @@ resource installSwiftScript 'Microsoft.Resources/deploymentScripts@2020-10-01' =
     retentionInterval: 'PT2H'
     cleanupPreference: 'OnExpiration'
     timeout: 'PT30M'
-    primaryScriptUri: 'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/installSwift.sh'
+    primaryScriptUri: 'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/installSwift.sh'
     arguments: '-g ${rg} -c ${clusterName} -u ${subscriptionId} -v ${infraVnetName} -t "${ds.properties.outputs.salToken}|${ds.properties.outputs.salToken1}" -V ${customerVnet.properties.resourceGuid} -d ${cosmosdbName} -W ${join(workerVMSSNames, ',')} -D ${join(dncVMSSNames, ',')} -N ${customerVnetName}'
+    // arguments: '-g ${rg} -c ${clusterName} -u ${subscriptionId} -v ${infraVnetName} -t "abc|def" -V ${customerVnet.properties.resourceGuid} -d ${cosmosdbName} -W ${join(workerVMSSNames, ',')} -D ${join(dncVMSSNames, ',')} -N ${customerVnetName}'
     supportingScriptUris: [
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/Chart.yaml'
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/values.yaml'
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/cni-plugins-installer.yaml'
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/cns-unmanaged-windows.yaml'
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/cns-unmanaged.yaml'
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/azure_cni_daemonset.yaml'
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/azure_cns_configmap.yaml'
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/dnc_deployment.yaml'
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/azure_cns_daemonset.yaml'
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/dnc_configmap.yaml'
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/test.sh'
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/dnc_configmap_pubsubproxy.yaml'
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/container1.yaml'
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/container2.yaml'
-      'https://raw.githubusercontent.com/rajvinar/sdnrunnerpoc/refs/heads/main/roleAssignmentsInSub.bicep'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/Chart.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/values.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/cni-plugins-installer.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/cns-unmanaged-windows.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/cns-unmanaged.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/azure_cni_daemonset.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/azure_cns_configmap.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/dnc_deployment.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/azure_cns_daemonset.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/dnc_configmap.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/test.sh'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/dnc_configmap_pubsubproxy.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/container1.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/container2.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/container3.yaml'
+      'https://raw.githubusercontent.com/danlai-ms/dan-test/refs/heads/dala-test-ms-full/roleAssignmentsInSub.bicep'
     ]
   }
   // tags: {
@@ -648,4 +622,31 @@ output subnetIds array = installSwiftScript.properties.outputs.subnetIDs
 
 
 
-
+// Cleanup script
+resource dsGc 'Microsoft.Resources/deploymentScripts@2023-08-01' = {
+  #disable-next-line use-stable-resource-identifiers
+  name: 'ds-gc-${uniqueString(resourceGroup().name)}' 
+  kind: 'AzureCLI'
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${userAssignedIdentity.id}': {}
+    }
+  }
+  dependsOn: [
+    ds
+    storageContributor
+  ]
+  location: region
+  properties: {
+    azCliVersion: '2.69.0'
+    forceUpdateTag: randomGuid
+    retentionInterval: 'PT2H'
+    cleanupPreference: 'Always'
+    timeout: 'PT20M'
+    scriptContent: concat(
+      'az account set -s ${subscription().subscriptionId};',
+      'az storage account delete --name ${dsStorage.name} -y;'
+    )
+  }
+}

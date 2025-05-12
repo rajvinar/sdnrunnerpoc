@@ -69,6 +69,7 @@ if [ ! -d "./chart" ]; then
     mv cni-plugins-installer.yaml chart/templates/
     mv cns-unmanaged-windows.yaml chart/templates/
     mv cns-unmanaged.yaml chart/templates/
+    mv kube-proxy-unmanaged.yaml chart/templates/
 else
     echo "Folder 'chart' already exists."
 fi
